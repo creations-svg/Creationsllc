@@ -18,6 +18,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const C = require('./public/core.js');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -50,6 +51,38 @@ const ENV = {
 };
 const waCallMeBot = () => !!(ENV.cmbPhone && ENV.cmbKey);
 const waCloud = () => !!(ENV.waToken && ENV.waPhoneId && ENV.waTo);
+
+// ------------------------------------------------------------ acceso
+/*
+ * Con APP_USERS="usuario:contraseña,otro:clave" o APP_PASSWORD (usuario APP_USER, por defecto «radar»)
+ * toda la app exige inicio de sesión (HTTP Basic, siempre sobre HTTPS) y los datos se guardan por
+ * usuario de login, compartidos entre todos sus dispositivos. /api/health queda libre para el
+ * chequeo de salud del hosting. Sin estas variables (uso local), cada dispositivo es un usuario.
+ */
+const ACCOUNTS = (() => {
+  const out = new Map();
+  for (const pair of (process.env.APP_USERS || '').split(',').map((x) => x.trim()).filter(Boolean)) {
+    const i = pair.indexOf(':');
+    if (i > 0) out.set(pair.slice(0, i), pair.slice(i + 1));
+  }
+  if (process.env.APP_PASSWORD) out.set(process.env.APP_USER || 'radar', process.env.APP_PASSWORD);
+  return out;
+})();
+const AUTH = ACCOUNTS.size > 0;
+const sha = (x) => crypto.createHash('sha256').update(String(x)).digest();
+function authenticate(req) {
+  const h = req.headers.authorization || '';
+  if (!h.startsWith('Basic ')) return null;
+  const dec = Buffer.from(h.slice(6), 'base64').toString('utf8');
+  const i = dec.indexOf(':');
+  if (i < 0) return null;
+  const user = dec.slice(0, i), pass = dec.slice(i + 1);
+  const expected = ACCOUNTS.get(user);
+  // Comparación en tiempo constante (sobre hashes de igual longitud).
+  const ok = crypto.timingSafeEqual(sha(pass), sha(expected == null ? crypto.randomBytes(16) : expected)) && expected != null;
+  return ok ? user : null;
+}
+const loginUserId = (name) => 'login_' + crypto.createHash('sha256').update(name).digest('hex').slice(0, 24);
 
 // ------------------------------------------------------------ almacenamiento
 const validUser = (id) => typeof id === 'string' && /^[a-zA-Z0-9_-]{6,64}$/.test(id);
@@ -282,7 +315,7 @@ function serveStatic(req, res, pathname) {
   });
 }
 function publicState(s) {
-  return { ...s, sentKeys: undefined, server: { provider: providerName(), historyProvider: ENV.alpha ? 'Alpha Vantage' : 'Demostración', channels: channelStatus(), realExecutionAvailable: false, pollMinutes: ENV.pollMinutes } };
+  return { ...s, sentKeys: undefined, server: { auth: AUTH, provider: providerName(), historyProvider: ENV.alpha ? 'Alpha Vantage' : 'Demostración', channels: channelStatus(), realExecutionAvailable: false, pollMinutes: ENV.pollMinutes } };
 }
 
 const routes = [
@@ -334,12 +367,20 @@ const routes = [
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  let login = null;
+  if (AUTH && url.pathname !== '/api/health') {
+    login = authenticate(req);
+    if (!login) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="Radar Bursatil USA", charset="UTF-8"', 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('Inicia sesión para usar Radar Bursátil USA.');
+    }
+  }
   if (!url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
   const route = routes.find(([m, re]) => m === req.method && re.test(url.pathname));
   if (!route) return send(res, 404, { error: 'Ruta no encontrada' });
   try {
     const needsUser = !/^\/api\/(health|market|fx|quotes|history)$/.test(url.pathname);
-    const user = req.headers['x-user-id'];
+    const user = login ? loginUserId(login) : req.headers['x-user-id'];
     if (needsUser && !validUser(user)) return send(res, 401, { error: 'Falta un identificador de usuario válido (X-User-Id)' });
     const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await readBody(req) : {};
     const out = await route[2]({ query: url.searchParams, body, user }, url.pathname.match(route[1]));
@@ -350,8 +391,14 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
+  // En Render (variable RENDER) la app queda en Internet: no arrancar sin contraseña.
+  if (process.env.RENDER && !AUTH) {
+    console.error('ERROR: configura APP_PASSWORD (o APP_USERS) en Render antes de publicar la app.');
+    process.exit(1);
+  }
   server.listen(PORT, () => {
     console.log(`Radar Bursátil USA en http://localhost:${PORT}`);
+    console.log(AUTH ? `Acceso con contraseña: ${ACCOUNTS.size} usuario(s)` : 'AVISO: sin APP_PASSWORD/APP_USERS la app no pide contraseña (solo para uso local).');
     console.log(`Datos: ${providerName()} · Historial: ${ENV.alpha ? 'Alpha Vantage' : 'Demostración'} · Canales: ${channelStatus().filter((c) => c.active).map((c) => c.id).join(', ')}`);
   });
   setInterval(() => tick().catch((e) => console.error('tick', e)), 60000);

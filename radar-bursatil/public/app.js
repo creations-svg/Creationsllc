@@ -631,7 +631,7 @@
       <div class="row"><span>Cotizaciones</span><span>${esc(S.state.server.provider)}</span></div>
       <div class="row"><span>Historial</span><span>${esc(S.state.server.historyProvider)}</span></div>
       <div class="row"><span>Modo</span><span>${SERVER ? 'Servidor (datos guardados por usuario)' : 'Local (este navegador)'}</span></div>
-      <div class="row"><span>Usuario</span><span class="mono" style="font-size:12px">${esc(USER)}</span></div>
+      <div class="row"><span>Usuario</span><span class="mono" style="font-size:12px">${S.state.server.auth ? 'Sesión con contraseña (compartida entre tus dispositivos)' : esc(USER)}</span></div>
       <div class="actions"><button class="btn primary" value="save">Guardar</button><button class="btn" value="cancel" formnovalidate>Cancelar</button><button class="btn ghost danger small" value="reset" formnovalidate>Borrar mis datos</button></div>`,
     async (d, action) => {
       if (action === 'test') { await api.testNotify(); await loadState(); toast('Notificación de prueba enviada'); renderBadge(); return true; }

@@ -1,0 +1,37 @@
+# Render Blueprint — Radar Bursátil USA
+# Render lee este archivo al crear un «New → Blueprint» con este repositorio.
+# Plan «starter»: el plan gratuito se duerme tras 15 min sin visitas (no enviaría la alerta de
+# las 8:00 ni vigilaría posiciones) y no admite disco persistente (se perderían los datos).
+services:
+  - type: web
+    name: radar-bursatil
+    runtime: node
+    rootDir: radar-bursatil
+    plan: starter
+    region: virginia
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: radar-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_DIR
+        value: /var/data
+      - key: APP_USER
+        value: radar
+      # Valores secretos: Render los pide al crear el Blueprint (no se guardan en el repositorio).
+      - key: APP_PASSWORD
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: ALPHAVANTAGE_API_KEY
+        sync: false
+      - key: WHATSAPP_CALLMEBOT_PHONE
+        sync: false
+      - key: WHATSAPP_CALLMEBOT_APIKEY
+        sync: false

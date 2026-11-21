@@ -11,7 +11,7 @@ Requisitos: Node.js 18 o superior. No hay dependencias que instalar.
 ```bash
 cd radar-bursatil
 npm start          # http://localhost:3000
-npm test           # 34 pruebas: lógica, API de extremo a extremo y WhatsApp
+npm test           # 38 pruebas: lógica, API, WhatsApp e inicio de sesión
 ```
 
 Sin claves configuradas, la app funciona en **modo demostración**: cotizaciones e historial sintéticos, marcados como «Simulada (demo)» y con un aviso visible. Si se abre `public/index.html` sin servidor, todo corre en el navegador y los datos se guardan solo en ese dispositivo.
@@ -64,7 +64,7 @@ En **Ajustes → Enviar notificación de prueba** puedes comprobar los canales. 
 
 **Vigilancia de posiciones.** Durante el horario extendido (4:00–20:00 hora de NY), el servidor revisa las posiciones abiertas cada `QUOTE_POLL_MINUTES` minutos (5 por defecto).
 
-**Despliegue.** El servidor debe estar encendido para enviar alertas. Sirve cualquier servicio que ejecute Node con disco persistente (Render, Railway, Fly.io, un VPS). Configura `DATA_DIR` hacia el volumen persistente y sirve la app por HTTPS.
+**Despliegue.** El servidor debe estar encendido para enviar alertas. Ver la sección 8 (Render).
 
 ## 4. Cómo se usa la estrategia del +10 %
 
@@ -102,6 +102,28 @@ En **Práctica** (Simulador) el cierre es automático al tocar el objetivo, al p
 
 Está **desactivada y bloqueada**: el servidor la fuerza a `false` y la API no permite marcar un cierre como «integración». Para habilitarla haría falta una integración oficial del bróker (OAuth y API autorizada) y tu autorización expresa en cada operación. Esta versión no la incluye.
 
-## 7. Datos por usuario
+## 7. Acceso y datos por usuario
 
-Cada dispositivo genera un identificador y el servidor guarda sus posiciones, preferencias e historial en `data/users/<id>.json`. Antes de exponer el servidor a Internet, ponlo detrás de un inicio de sesión (por ejemplo, un proxy con autenticación) o añade cuentas de usuario: el identificador por sí solo no es una contraseña.
+Con `APP_PASSWORD` (usuario `APP_USER`, por defecto `radar`) o con `APP_USERS="ana:clave1,beto:clave2"`, toda la app pide usuario y contraseña. El navegador muestra su ventana de inicio de sesión y la recuerda. Los datos se guardan por usuario de login (`data/users/login_*.json`), así que **el celular y el computador ven las mismas operaciones**. Usa una contraseña larga y solo por HTTPS (Render lo da por defecto).
+
+Sin esas variables (uso local), cada dispositivo es un usuario distinto. En Render la app **se niega a arrancar sin contraseña**.
+
+## 8. Publicar en Render
+
+El repositorio incluye `render.yaml` (Blueprint) en la raíz.
+
+1. Une este pull request a la rama principal, o elige esta rama al crear el Blueprint.
+2. En render.com: **New → Blueprint**, conecta GitHub y elige el repositorio `Creationsllc`.
+3. Render pedirá los valores secretos:
+   - `APP_PASSWORD`: **obligatoria**, larga y única
+   - `FINNHUB_API_KEY` y `ALPHAVANTAGE_API_KEY`: déjalas vacías para seguir en modo demostración
+   - `WHATSAPP_CALLMEBOT_PHONE` (`+57…`) y `WHATSAPP_CALLMEBOT_APIKEY`: ver sección 3
+4. **Apply.** En unos minutos tendrás una URL `https://radar-bursatil-xxxx.onrender.com`. Ábrela en el celular, inicia sesión con usuario `radar` y tu contraseña, y usa «Agregar a la pantalla de inicio».
+5. En **Ajustes → Enviar notificación de prueba** comprueba que llega el WhatsApp.
+
+**Costo.** Plan *Starter* (alrededor de USD 7/mes) más el disco de 1 GB (centavos al mes). Revisa los precios actuales en render.com/pricing. El plan gratuito no sirve para esta app: se duerme a los 15 minutos sin visitas (no saldría la alerta de las 8:00) y no tiene disco persistente (se borrarían tus operaciones en cada reinicio).
+
+**Otros datos:**
+- Los datos quedan en el disco `/var/data`. Render guarda instantáneas diarias del disco.
+- Para agregar la API oficial de WhatsApp (Meta), Telegram o el webhook: **Environment** del servicio → agrega las variables de la sección 3 → **Save** (se reinicia solo).
+- Cada push a la rama conectada se despliega automáticamente.
