@@ -1,0 +1,13 @@
+{
+  "name": "radar-bursatil-usa",
+  "version": "0.1.0",
+  "description": "Radar, objetivos al +10 % y seguimiento de operaciones en acciones de EE. UU. desde Colombia",
+  "private": true,
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "license": "UNLICENSED"
+}
