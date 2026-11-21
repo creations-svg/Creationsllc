@@ -193,11 +193,14 @@
     const stop = p.stopPct ? p.avgPrice * (1 - p.stopPct / 100) : null;
     return { gross: r2(gross), net: r2(net), trigger: r2(trigger), stop: stop != null ? r2(stop) : null, pct: pct * 100 };
   }
+  // Capital inicial de la operación (no cambia con las ventas parciales).
+  const initialCost = (p) => p.capital || positionCost(p);
   function positionMetrics(p, price) {
     const t = targets(p);
-    const cost = positionCost(p);
+    const cost = positionCost(p); // costo de las acciones que siguen abiertas
+    const realized = p.realizedPnl || 0;
     if (p.status === 'cerrada') {
-      return { targets: t, cost: r2(cost), marketValue: 0, pnl: r2(p.realizedPnl), pnlPct: r4(p.realizedPnl / cost), toTargetPct: 0, toTargetUsd: 0, progress: 1, exposed: 0 };
+      return { targets: t, cost: 0, marketValue: 0, pnl: r2(realized), pnlPct: r4(realized / initialCost(p)), realized: r2(realized), toTargetPct: 0, toTargetUsd: 0, progress: 1, exposed: 0 };
     }
     const mv = price * p.shares;
     const pnl = mv - sellFees(p, price) - cost;
@@ -205,20 +208,24 @@
     const range = t.trigger - p.avgPrice;
     return {
       targets: t, cost: r2(cost), marketValue: r2(mv), pnl: r2(pnl), pnlPct: r4(pnl / cost),
-      pnlGross: r2(mv - p.avgPrice * p.shares),
+      pnlGross: r2(mv - p.avgPrice * p.shares), realized: r2(realized),
       toTargetUsd: r2(toTargetUsd), toTargetPct: r4(toTargetUsd / price),
       progress: range > 0 ? Math.max(0, Math.min(1, (price - p.avgPrice) / range)) : 0,
       exposed: r2(mv),
     };
   }
 
+  const TICKER_RE = /^[A-Z][A-Z0-9.\-]{0,9}$/;
+  const optPct = (v, dflt) => (v === '' || v == null ? (dflt || null) : (num(v) || null));
+
   // Crea una posición validada a partir de los datos del formulario.
   function createPosition(input, settings = DEFAULT_SETTINGS) {
     const ticker = String(input.ticker || '').trim().toUpperCase();
-    if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker)) throw new Error('Ticker inválido');
+    if (!TICKER_RE.test(ticker)) throw new Error('Ticker inválido');
     const avgPrice = num(input.avgPrice);
     if (!(avgPrice > 0)) throw new Error('El precio promedio de compra debe ser mayor que 0');
     const buyFee = num(input.buyFee, settings.defaultBuyFee || 0);
+    if (buyFee < 0) throw new Error('La comisión no puede ser negativa');
     let shares = num(input.shares);
     const capital = num(input.capital);
     if (!(shares > 0) && capital > 0) shares = (capital - buyFee) / avgPrice; // eToro permite fracciones
@@ -232,22 +239,41 @@
       sellFeeFixed: r2(num(input.sellFeeFixed, settings.defaultSellFeeFixed || 0)),
       sellFeePct: num(input.sellFeePct, settings.defaultSellFeePct || 0),
       targetPct: num(input.targetPct, settings.targetPct || 10),
-      targetBasis: input.targetBasis || settings.targetBasis || 'bruto',
-      stopPct: input.stopPct === '' || input.stopPct == null ? (settings.stopPct || null) : (num(input.stopPct) || null),
+      targetBasis: input.targetBasis === 'neto' || input.targetBasis === 'bruto' ? input.targetBasis : (settings.targetBasis || 'bruto'),
+      stopPct: optPct(input.stopPct, settings.stopPct),
       openedAt: input.openedAt || new Date().toISOString(),
       status: 'abierta',
       targetHitAt: null, targetHitPrice: null,
       stopHitAt: null, stopHitPrice: null,
-      close: null, realizedPnl: null,
+      fills: [], close: null, realizedPnl: 0,
+      edits: [],
       notes: String(input.notes || '').slice(0, 500),
     };
+    p.initialShares = p.shares;
     p.capital = r2(positionCost(p));
     p.overLimit = settings.maxCapitalPerTrade > 0 && p.capital > settings.maxCapitalPerTrade;
     return p;
   }
 
-  // Cierre: en real exige precio ejecutado; en simulación lo hace el motor.
+  // Compatibilidad con posiciones guardadas antes de las ventas parciales.
+  function upgradePosition(p) {
+    if (!Array.isArray(p.fills)) {
+      p.fills = p.close ? [{ id: uid('fill'), shares: p.shares, price: p.close.price, fee: p.close.fee, date: p.close.date, source: p.close.source, pnl: p.realizedPnl }] : [];
+      if (p.close) p.shares = 0;
+    }
+    if (p.initialShares == null) p.initialShares = p.shares + p.fills.reduce((a, f) => a + f.shares, 0);
+    if (p.realizedPnl == null) p.realizedPnl = 0;
+    if (!Array.isArray(p.edits)) p.edits = [];
+    return p;
+  }
+
+  /*
+   * Registra una venta ejecutada, total o parcial (exec.shares; por defecto todas las que quedan).
+   * En modo real solo se acepta la ejecución registrada por el usuario o confirmada por una
+   * integración autorizada. La posición pasa a «cerrada» cuando ya no quedan acciones.
+   */
   function closePosition(p, exec) {
+    upgradePosition(p);
     if (p.status === 'cerrada') throw new Error('La posición ya está cerrada');
     const price = num(exec && exec.price);
     if (!(price > 0)) throw new Error('Para cerrar debes registrar el precio efectivamente ejecutado');
@@ -255,12 +281,104 @@
     if (p.mode === 'real' && !['manual', 'integracion'].includes(source)) {
       throw new Error('Una posición real solo se cierra con la ejecución registrada por el usuario o confirmada por una integración autorizada');
     }
-    const fee = exec.fee != null && exec.fee !== '' ? num(exec.fee) : sellFees(p, price);
-    const proceeds = price * p.shares - fee;
-    p.status = 'cerrada';
-    p.close = { price: r4(price), date: exec.date || new Date().toISOString(), fee: r2(fee), source };
-    p.realizedPnl = r2(proceeds - positionCost(p));
-    p.realizedPct = r4(p.realizedPnl / positionCost(p));
+    const remaining = p.shares;
+    let q = exec.shares === '' || exec.shares == null ? remaining : num(exec.shares);
+    if (!(q > 0)) throw new Error('El número de acciones vendidas debe ser mayor que 0');
+    if (q > remaining + 1e-6) throw new Error(`Solo quedan ${r4(remaining)} acciones abiertas`);
+    const full = q >= remaining - 1e-6;
+    if (full) q = remaining;
+    const fee = exec.fee != null && exec.fee !== '' ? num(exec.fee) : sellFees(p, price, q);
+    if (fee < 0) throw new Error('La comisión no puede ser negativa');
+    const feeShare = full ? p.buyFee : p.buyFee * (q / remaining); // comisión de compra prorrateada
+    const pnl = price * q - fee - (p.avgPrice * q + feeShare);
+    const fill = { id: uid('fill'), shares: r4(q), price: r4(price), fee: r2(fee), date: exec.date || new Date().toISOString(), source, pnl: r2(pnl), buyFeeShare: r2(feeShare) };
+    p.fills.push(fill);
+    p.realizedPnl = r2((p.realizedPnl || 0) + pnl);
+    p.shares = full ? 0 : r4(remaining - q);
+    p.buyFee = full ? 0 : r2(p.buyFee - feeShare);
+    if (full) {
+      const sold = p.fills.reduce((a, f) => a + f.shares, 0);
+      p.status = 'cerrada';
+      p.close = {
+        price: r4(p.fills.reduce((a, f) => a + f.price * f.shares, 0) / sold), // precio promedio de salida
+        date: fill.date, fee: r2(p.fills.reduce((a, f) => a + f.fee, 0)), source, fills: p.fills.length,
+      };
+      p.realizedPct = r4(p.realizedPnl / initialCost(p));
+    }
+    return p;
+  }
+
+  // Deshace la última venta registrada (para corregir un error de captura).
+  function undoLastFill(state, id) {
+    const p = state.positions.find((x) => x.id === id);
+    if (!p) throw new Error('Posición no encontrada');
+    upgradePosition(p);
+    const f = p.fills.pop();
+    if (!f) throw new Error('Esta posición no tiene ventas registradas');
+    p.shares = r4(p.shares + f.shares);
+    p.buyFee = r2(p.buyFee + (f.buyFeeShare || 0));
+    p.realizedPnl = r2(p.realizedPnl - f.pnl);
+    if (p.status === 'cerrada') {
+      p.status = p.targetHitAt ? 'objetivo_alcanzado' : 'abierta';
+      p.close = null; p.realizedPct = null;
+    }
+    p.edits.push({ at: new Date().toISOString(), fields: ['venta deshecha: ' + f.shares + ' a ' + f.price] });
+    return p;
+  }
+
+  /*
+   * Edita una operación. Reglas:
+   *  - Cerrada: solo notas (para corregir una venta, deshazla primero).
+   *  - Con ventas registradas: no se puede cambiar ticker, precio de compra, acciones ni comisión de compra.
+   *  - Si cambia el objetivo o el stop, se rearma su alerta (se vuelve a avisar si el precio lo toca).
+   */
+  const EDITABLE = ['ticker', 'avgPrice', 'shares', 'buyFee', 'sellFeeFixed', 'sellFeePct', 'targetPct', 'targetBasis', 'stopPct', 'openedAt', 'notes'];
+  function editPosition(state, id, changes, settings = state.settings) {
+    const p = state.positions.find((x) => x.id === id);
+    if (!p) throw new Error('Posición no encontrada');
+    upgradePosition(p);
+    const ch = {};
+    for (const k of EDITABLE) if (changes[k] !== undefined) ch[k] = changes[k];
+    if (p.status === 'cerrada' && Object.keys(ch).some((k) => k !== 'notes')) {
+      throw new Error('Una operación cerrada solo admite cambios en las notas. Para corregir la venta, deshazla primero.');
+    }
+    const locked = ['ticker', 'avgPrice', 'shares', 'buyFee'];
+    const before = { ...p };
+    const changed = [];
+    const set = (k, v) => { if (v !== p[k]) { p[k] = v; changed.push(k); } };
+    if (p.fills.length) {
+      for (const k of locked) {
+        if (ch[k] === undefined) continue;
+        const v = k === 'ticker' ? String(ch[k]).trim().toUpperCase() : num(ch[k]);
+        if (v !== p[k]) throw new Error('Con ventas parciales registradas no se puede cambiar ticker, precio de compra, acciones ni comisión de compra. Deshaz las ventas primero.');
+      }
+    }
+    if (ch.ticker !== undefined) { const t = String(ch.ticker).trim().toUpperCase(); if (!TICKER_RE.test(t)) throw new Error('Ticker inválido'); set('ticker', t); }
+    if (ch.avgPrice !== undefined) { const v = num(ch.avgPrice); if (!(v > 0)) throw new Error('El precio promedio de compra debe ser mayor que 0'); set('avgPrice', r4(v)); }
+    if (ch.shares !== undefined) { const v = num(ch.shares); if (!(v > 0)) throw new Error('El número de acciones debe ser mayor que 0'); set('shares', r4(v)); }
+    for (const k of ['buyFee', 'sellFeeFixed', 'sellFeePct']) if (ch[k] !== undefined) { const v = num(ch[k]); if (v < 0) throw new Error('Las comisiones no pueden ser negativas'); set(k, k === 'sellFeePct' ? v : r2(v)); }
+    if (ch.targetPct !== undefined) { const v = num(ch.targetPct); if (!(v > 0)) throw new Error('El objetivo debe ser mayor que 0 %'); set('targetPct', v); }
+    if (ch.targetBasis !== undefined) { if (!['bruto', 'neto'].includes(ch.targetBasis)) throw new Error('Base de objetivo inválida'); set('targetBasis', ch.targetBasis); }
+    if (ch.stopPct !== undefined) set('stopPct', optPct(ch.stopPct, null));
+    if (ch.openedAt !== undefined && ch.openedAt) set('openedAt', ch.openedAt);
+    if (ch.notes !== undefined) set('notes', String(ch.notes).slice(0, 500));
+    if (!changed.length) return p;
+    if (!p.fills.length && changed.some((k) => locked.includes(k))) {
+      p.initialShares = p.shares;
+      p.capital = r2(positionCost(p));
+      p.overLimit = settings.maxCapitalPerTrade > 0 && p.capital > settings.maxCapitalPerTrade;
+    }
+    // Rearmar alertas si cambió algo que mueve el objetivo o el stop.
+    if (targets(p).trigger !== targets(before).trigger && p.status === 'objetivo_alcanzado') {
+      p.status = 'abierta'; p.targetHitAt = null; p.targetHitPrice = null;
+      delete state.sentKeys['objetivo:' + p.id];
+    }
+    if (targets(p).stop !== targets(before).stop && p.stopHitAt) {
+      p.stopHitAt = null; p.stopHitPrice = null;
+      delete state.sentKeys['perdida:' + p.id];
+    }
+    p.edits.push({ at: new Date().toISOString(), fields: changed });
+    if (p.edits.length > 50) p.edits = p.edits.slice(-50);
     return p;
   }
 
@@ -318,7 +436,7 @@
       settings: { ...e.settings, ...(s.settings || {}), realExecution: false },
       filters: { ...e.filters, ...(s.filters || {}) },
       watchlist: Array.isArray(s.watchlist) && s.watchlist.length ? s.watchlist : e.watchlist,
-      positions: Array.isArray(s.positions) ? s.positions : [],
+      positions: Array.isArray(s.positions) ? s.positions.map(upgradePosition) : [],
       notifications: Array.isArray(s.notifications) ? s.notifications.slice(0, 200) : [],
       sentKeys: s.sentKeys || {},
     };
@@ -399,7 +517,7 @@
       const s = sectorOf(p.ticker);
       bySector[s] = (bySector[s] || 0) + m.marketValue;
     }
-    const realized = closed.reduce((a, p) => a + (p.realizedPnl || 0), 0);
+    const realized = ps.reduce((a, p) => a + (p.realizedPnl || 0), 0); // incluye ventas parciales
     const cash = mode === 'simulacion'
       ? state.settings.virtualCapital - invested + realized
       : num(state.settings.realCash);
@@ -717,7 +835,7 @@
     r2, r4, num, uid, ymd, addDays, daysBetween, zoned, zonedToUtc,
     nyseHolidays, isTradingDay, nextTradingDay, holidayName, earlyClose, marketStatus, nextDailyAlert,
     DEFAULT_SETTINGS, DEFAULT_FILTERS, DEFAULT_WATCHLIST,
-    targets, positionCost, positionMetrics, createPosition, closePosition, evaluatePosition,
+    targets, positionCost, positionMetrics, createPosition, closePosition, evaluatePosition, editPosition, undoLastFill, upgradePosition,
     emptyState, normalizeState, recordNotification, applyQuotes, eventKey,
     sectorOf, portfolioSummary, barStats, screen, sourceLinks, backtest,
     demoBars, demoQuote, demoEarnings, acceptanceChecks, NY, BOGOTA,

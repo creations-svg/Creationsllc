@@ -11,7 +11,7 @@ Requisitos: Node.js 18 o superior. No hay dependencias que instalar.
 ```bash
 cd radar-bursatil
 npm start          # http://localhost:3000
-npm test           # 20 pruebas: lógica y API de extremo a extremo
+npm test           # 34 pruebas: lógica, API de extremo a extremo y WhatsApp
 ```
 
 Sin claves configuradas, la app funciona en **modo demostración**: cotizaciones e historial sintéticos, marcados como «Simulada (demo)» y con un aviso visible. Si se abre `public/index.html` sin servidor, todo corre en el navegador y los datos se guardan solo en ese dispositivo.
@@ -37,7 +37,26 @@ La bandeja de la app y las notificaciones del navegador (con la app abierta) fun
 |---|---|
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Telegram: crea un bot con @BotFather y obtén tu chat id |
 | `NTFY_TOPIC` (opcional `NTFY_SERVER`) | Push con la app ntfy: suscríbete al mismo tema, usa un nombre difícil de adivinar |
-| `NOTIFY_WEBHOOK_URL` | POST JSON `{title, body, type, ticker, createdAt, key}`: conéctalo a Zapier, Make o n8n para correo o WhatsApp |
+| `NOTIFY_WEBHOOK_URL` | POST JSON `{title, body, type, ticker, createdAt, key}`: conéctalo a Zapier, Make o n8n para correo |
+| WhatsApp | Ver abajo: CallMeBot (rápido, personal) o API oficial de Meta |
+
+### WhatsApp
+
+**Opción A: CallMeBot.** Es gratis, solo para uso personal y solo te escribe a tu propio número. Se activa en unos 2 minutos:
+1. Guarda en tus contactos el número que indica callmebot.com (sección WhatsApp) y envíale el mensaje de activación que dice la página.
+2. Te responderá con tu `apikey`.
+3. En el servidor configura `WHATSAPP_CALLMEBOT_PHONE=+57XXXXXXXXXX` y `WHATSAPP_CALLMEBOT_APIKEY=<tu apikey>`.
+
+Es un servicio de terceros sin garantía de entrega. Úsalo para avisos personales.
+
+**Opción B: API oficial de WhatsApp Cloud (Meta).** Es más robusta y requiere una cuenta de Meta for Developers con un número de WhatsApp Business:
+- `WHATSAPP_TOKEN`: token de acceso permanente (usuario del sistema)
+- `WHATSAPP_PHONE_NUMBER_ID`: id del número emisor
+- `WHATSAPP_TO`: tu celular, por ejemplo `+573001234567`
+- `WHATSAPP_TEMPLATE`: nombre de una **plantilla aprobada** de categoría «Utilidad», con un solo parámetro en el cuerpo, por ejemplo: `Radar Bursátil: {{1}}`
+- Opcionales: `WHATSAPP_TEMPLATE_LANG` (por defecto `es`) y `WHATSAPP_API_VERSION` (por defecto `v23.0`; actualízala si Meta la retira)
+
+Meta solo permite iniciar conversaciones con plantillas aprobadas. Sin `WHATSAPP_TEMPLATE`, el mensaje solo llega si le escribiste al número de la empresa en las últimas 24 horas. Meta puede cobrar por cada conversación iniciada. Si configuras ambas opciones, se usa la de Meta.
 
 En **Ajustes → Enviar notificación de prueba** puedes comprobar los canales. Cada notificación guarda por qué canales salió, su estado y la hora de envío.
 
@@ -54,7 +73,19 @@ En **Ajustes → Enviar notificación de prueba** puedes comprobar los canales. 
    - bruto = entrada × 1,10 (compra a USD 200 → USD 220)
    - neto = precio necesario para ganar el 10 % después de las comisiones que ingresaste
 3. Cuando el precio toca el objetivo, recibes una alerta y la operación pasa a **«Objetivo alcanzado»**. **Sigue abierta.**
-4. Cuando la venta se ejecute en eToro, pulsa **«Registrar venta ejecutada»** e ingresa el precio real. Solo entonces queda **«Cerrada»**, se detienen sus alertas y el resultado del historial usa ese precio.
+4. Cuando la venta se ejecute en eToro, pulsa **«Registrar venta»** e ingresa el precio real y el número de acciones vendidas. Solo cuando ya no quedan acciones abiertas la operación queda **«Cerrada»**, se detienen sus alertas y el resultado del historial usa esos precios.
+
+**Ventas parciales.** Si en eToro usas «Cerrar parcialmente», registra solo las acciones vendidas. La operación sigue abierta con el resto:
+- La comisión de compra se reparte en proporción a las acciones vendidas.
+- El resultado de cada venta se suma al «Rend. realizado».
+- Al cerrar todo, el precio de salida es el promedio ponderado de todas las ventas.
+- «Deshacer última venta» corrige un error de captura.
+
+**Editar.** Puedes corregir precio de compra, acciones, comisiones, objetivo, alerta de pérdida, fecha y notas. Hay dos límites:
+- Con ventas registradas, el ticker, el precio de compra, las acciones y la comisión de compra quedan fijos. Deshaz las ventas para cambiarlos.
+- Una operación cerrada solo admite cambios en las notas.
+
+Si cambias el objetivo o la alerta de pérdida, la alerta se rearma y vuelve a avisarte cuando el precio toque el nuevo nivel. Cada edición queda registrada con su fecha.
 
 En **Práctica** (Simulador) el cierre es automático al tocar el objetivo, al precio objetivo, para probar la estrategia con capital virtual.
 

@@ -10,6 +10,8 @@
  *
  * Variables de entorno (ver GUIA.md): PORT, FINNHUB_API_KEY, ALPHAVANTAGE_API_KEY,
  * TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, NTFY_TOPIC, NTFY_SERVER, NOTIFY_WEBHOOK_URL,
+ * WHATSAPP_CALLMEBOT_PHONE, WHATSAPP_CALLMEBOT_APIKEY, WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID,
+ * WHATSAPP_TO, WHATSAPP_TEMPLATE, WHATSAPP_TEMPLATE_LANG, WHATSAPP_API_VERSION,
  * QUOTE_POLL_MINUTES, DATA_DIR.
  */
 'use strict';
@@ -33,7 +35,21 @@ const ENV = {
   ntfyServer: process.env.NTFY_SERVER || 'https://ntfy.sh',
   webhook: process.env.NOTIFY_WEBHOOK_URL || '',
   pollMinutes: Number(process.env.QUOTE_POLL_MINUTES || 5),
+  // WhatsApp, opción 1: CallMeBot (gratis, uso personal, solo a tu propio número)
+  cmbPhone: process.env.WHATSAPP_CALLMEBOT_PHONE || '',
+  cmbKey: process.env.WHATSAPP_CALLMEBOT_APIKEY || '',
+  // WhatsApp, opción 2: API oficial WhatsApp Cloud (Meta)
+  waToken: process.env.WHATSAPP_TOKEN || '',
+  waPhoneId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+  waTo: process.env.WHATSAPP_TO || '',
+  waTemplate: process.env.WHATSAPP_TEMPLATE || '',
+  waLang: process.env.WHATSAPP_TEMPLATE_LANG || 'es',
+  waVersion: process.env.WHATSAPP_API_VERSION || 'v23.0',
+  waBase: process.env.WHATSAPP_API_BASE || 'https://graph.facebook.com', // cambiable solo para pruebas
+  cmbBase: process.env.CALLMEBOT_API_BASE || 'https://api.callmebot.com',
 };
+const waCallMeBot = () => !!(ENV.cmbPhone && ENV.cmbKey);
+const waCloud = () => !!(ENV.waToken && ENV.waPhoneId && ENV.waTo);
 
 // ------------------------------------------------------------ almacenamiento
 const validUser = (id) => typeof id === 'string' && /^[a-zA-Z0-9_-]{6,64}$/.test(id);
@@ -153,7 +169,8 @@ function channelStatus() {
     { id: 'navegador', name: 'Notificación del navegador (con la app abierta)', active: true, note: 'Se activa desde Ajustes en cada dispositivo' },
     { id: 'telegram', name: 'Telegram', active: !!(ENV.tgToken && ENV.tgChat) },
     { id: 'ntfy', name: 'ntfy (push al celular)', active: !!ENV.ntfyTopic },
-    { id: 'webhook', name: 'Webhook (correo/WhatsApp vía Zapier, Make, n8n…)', active: !!ENV.webhook },
+    { id: 'whatsapp', name: 'WhatsApp', active: waCallMeBot() || waCloud(), note: waCloud() ? 'API oficial WhatsApp Cloud (Meta)' + (ENV.waTemplate ? ' · plantilla ' + ENV.waTemplate : ' · sin plantilla: solo llega si escribiste al número en las últimas 24 h') : waCallMeBot() ? 'CallMeBot (uso personal)' : 'Configúralo en el servidor (ver GUIA.md)' },
+    { id: 'webhook', name: 'Webhook (correo vía Zapier, Make, n8n…)', active: !!ENV.webhook },
   ];
 }
 async function dispatch(n) {
@@ -161,6 +178,23 @@ async function dispatch(n) {
   const jobs = [];
   if (ENV.tgToken && ENV.tgChat) jobs.push(['telegram', () => getJson(`https://api.telegram.org/bot${ENV.tgToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: ENV.tgChat, text }) })]);
   if (ENV.ntfyTopic) jobs.push(['ntfy', async () => { const r = await fetch(`${ENV.ntfyServer}/${encodeURIComponent(ENV.ntfyTopic)}`, { method: 'POST', body: n.body, headers: { Title: encodeURIComponent(n.title), Tags: n.type } }); if (!r.ok) throw new Error('HTTP ' + r.status); }]);
+  if (waCloud()) jobs.push(['whatsapp', async () => {
+    // Las plantillas de Meta no admiten saltos de línea en los parámetros.
+    const flat = text.replace(/\s*\n\s*/g, ' · ').replace(/ {4,}/g, ' ').slice(0, 1000);
+    const msg = ENV.waTemplate
+      ? { type: 'template', template: { name: ENV.waTemplate, language: { code: ENV.waLang }, components: [{ type: 'body', parameters: [{ type: 'text', text: flat }] }] } }
+      : { type: 'text', text: { body: text.slice(0, 4000) } };
+    await getJson(`${ENV.waBase}/${ENV.waVersion}/${encodeURIComponent(ENV.waPhoneId)}/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ENV.waToken}` },
+      body: JSON.stringify({ messaging_product: 'whatsapp', to: ENV.waTo.replace(/[^\d]/g, ''), ...msg }),
+    });
+  }]);
+  else if (waCallMeBot()) jobs.push(['whatsapp', async () => {
+    const u = `${ENV.cmbBase}/whatsapp.php?phone=${encodeURIComponent(ENV.cmbPhone)}&text=${encodeURIComponent(text.slice(0, 1500))}&apikey=${encodeURIComponent(ENV.cmbKey)}`;
+    const r = await fetch(u);
+    const body = await r.text();
+    if (!r.ok || /error|invalid/i.test(body.slice(0, 500))) throw new Error('CallMeBot HTTP ' + r.status);
+  }]);
   if (ENV.webhook) jobs.push(['webhook', async () => { const r = await fetch(ENV.webhook, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: n.title, body: n.body, type: n.type, ticker: n.ticker, createdAt: n.createdAt, key: n.key }) }); if (!r.ok) throw new Error('HTTP ' + r.status); }]);
   const results = [{ channel: 'app', status: 'enviada', sentAt: new Date().toISOString() }];
   for (const [ch, fn] of jobs) {
@@ -287,6 +321,8 @@ const routes = [
     const ns = mutate(ctx.user, (s) => C.applyQuotes(s, { [p0.ticker]: { price, type: 'manual', source: 'Ingreso manual', asOf: new Date().toISOString() } }));
     return { notifications: await finalizeNotifications(ctx.user, ns.filter((n) => n.ticker === p0.ticker)) };
   }],
+  ['PATCH', /^\/api\/positions\/([\w-]+)$/, async (ctx, m) => mutate(ctx.user, (s) => C.editPosition(s, m[1], ctx.body))],
+  ['POST', /^\/api\/positions\/([\w-]+)\/undo-fill$/, async (ctx, m) => mutate(ctx.user, (s) => C.undoLastFill(s, m[1]))],
   ['DELETE', /^\/api\/positions\/([\w-]+)$/, async (ctx, m) => mutate(ctx.user, (s) => { s.positions = s.positions.filter((x) => x.id !== m[1]); return { ok: true }; })],
   ['POST', /^\/api\/check$/, async (ctx) => ({ notifications: await checkPositions(ctx.user) })],
   ['GET', /^\/api\/radar$/, async (ctx) => { const r = await runRadar(loadState(ctx.user)); mutate(ctx.user, (s) => { s.lastRadar = r; }); return r; }],
@@ -305,7 +341,7 @@ const server = http.createServer(async (req, res) => {
     const needsUser = !/^\/api\/(health|market|fx|quotes|history)$/.test(url.pathname);
     const user = req.headers['x-user-id'];
     if (needsUser && !validUser(user)) return send(res, 401, { error: 'Falta un identificador de usuario válido (X-User-Id)' });
-    const body = ['POST', 'PUT'].includes(req.method) ? await readBody(req) : {};
+    const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await readBody(req) : {};
     const out = await route[2]({ query: url.searchParams, body, user }, url.pathname.match(route[1]));
     send(res, 200, out);
   } catch (e) {

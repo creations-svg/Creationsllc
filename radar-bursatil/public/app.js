@@ -39,6 +39,8 @@
     closePosition: (id, b) => call('POST', `/api/positions/${id}/close`, b),
     manualPrice: (id, price) => call('POST', `/api/positions/${id}/price`, { price }),
     deletePosition: (id) => call('DELETE', `/api/positions/${id}`),
+    editPosition: (id, b) => call('PATCH', `/api/positions/${id}`, b),
+    undoFill: (id) => call('POST', `/api/positions/${id}/undo-fill`),
     check: () => call('POST', '/api/check'),
     radar: () => call('GET', '/api/radar'),
     sendRadar: () => call('POST', '/api/radar/send'),
@@ -64,12 +66,14 @@
     return { ...C.screen(uni, s.filters, s.settings, d), generatedAt: new Date().toISOString(), nyDate: d, provider: 'Demostración' };
   };
   const local = {
-    getState: async () => ({ ...lload(), server: { provider: 'Demostración (local)', historyProvider: 'Demostración', realExecutionAvailable: false, channels: [{ id: 'app', name: 'Bandeja de la aplicación', active: true }, { id: 'navegador', name: 'Notificación del navegador (con la app abierta)', active: true }, { id: 'externos', name: 'Telegram / ntfy / webhook', active: false, note: 'Requieren el servidor (ver GUIA.md)' }] } }),
+    getState: async () => ({ ...lload(), server: { provider: 'Demostración (local)', historyProvider: 'Demostración', realExecutionAvailable: false, channels: [{ id: 'app', name: 'Bandeja de la aplicación', active: true }, { id: 'navegador', name: 'Notificación del navegador (con la app abierta)', active: true }, { id: 'externos', name: 'WhatsApp / Telegram / ntfy / webhook', active: false, note: 'Requieren el servidor (ver GUIA.md)' }] } }),
     saveSettings: async (b) => { lmut((s) => { if (b.settings) s.settings = { ...s.settings, ...b.settings, realExecution: false }; if (b.filters) s.filters = { ...s.filters, ...b.filters }; if (b.watchlist) s.watchlist = b.watchlist; }); return local.getState(); },
     addPosition: async (b) => lmut((s) => { const p = C.createPosition(b, s.settings); s.positions.unshift(p); return p; }),
     closePosition: async (id, b) => lmut((s) => { const p = s.positions.find((x) => x.id === id); if (!p) throw new Error('Posición no encontrada'); return C.closePosition(p, { ...b, source: 'manual' }); }),
     manualPrice: async (id, price) => lmut((s) => { const p = s.positions.find((x) => x.id === id); return { notifications: C.applyQuotes(s, { [p.ticker]: { price: C.num(price), type: 'manual' } }).filter((n) => n.ticker === p.ticker).map(sentNow) }; }),
     deletePosition: async (id) => lmut((s) => { s.positions = s.positions.filter((x) => x.id !== id); return { ok: true }; }),
+    editPosition: async (id, b) => lmut((s) => C.editPosition(s, id, b)),
+    undoFill: async (id) => lmut((s) => C.undoLastFill(s, id)),
     check: async () => lmut((s) => {
       const q = {}; s.positions.filter((p) => p.status !== 'cerrada').forEach((p) => { q[p.ticker] = C.demoQuote(p.ticker); });
       const out = C.applyQuotes(s, q).map(sentNow);
@@ -302,27 +306,34 @@
     const [sl, sc] = STATUS[p.status];
     const t = m.targets;
     const closed = p.status === 'cerrada';
+    const fills = p.fills || [];
+    const fillsHtml = fills.length ? `<details style="margin-top:8px" ${closed ? '' : 'open'}><summary>Ventas registradas (${fills.length}) · realizado <span class="${cls(p.realizedPnl)}">${susd(p.realizedPnl)}</span></summary><div style="margin-top:6px">${fills.map((f) => `<div class="row"><span>${when(f.date)} · ${nf4.format(f.shares)} acc. × ${usd(f.price)}<br><small>comisión ${usd(f.fee)} · ${f.source === 'simulacion' ? 'simulador' : f.source === 'integracion' ? 'integración' : 'registrada por ti'}</small></span><span class="${cls(f.pnl)}">${susd(f.pnl)}</span></div>`).join('')}</div></details>` : '';
     return `<article class="card pos-card">
       <div class="top">
-        <div><span class="ticker">${p.ticker}</span> <span class="tag ${sc}">${sl}</span> ${p.mode === 'simulacion' ? '<span class="tag sim">Práctica</span>' : `<span class="tag">${esc(p.broker)}</span>`}<br><small>${nf4.format(p.shares)} acciones · compra ${usd(p.avgPrice)} · ${when(p.openedAt)}</small></div>
+        <div><span class="ticker">${p.ticker}</span> <span class="tag ${sc}">${sl}</span> ${p.mode === 'simulacion' ? '<span class="tag sim">Práctica</span>' : `<span class="tag">${esc(p.broker)}</span>`}${!closed && fills.length ? ' <span class="tag">Venta parcial</span>' : ''}<br><small>${closed ? nf4.format(p.initialShares) : nf4.format(p.shares) + (fills.length ? ' de ' + nf4.format(p.initialShares) : '')} acciones · compra ${usd(p.avgPrice)} · ${when(p.openedAt)}</small></div>
         <div style="text-align:right">${closed ? `<div class="big ${cls(p.realizedPnl)}" style="font-size:1.2rem">${susd(p.realizedPnl)}</div><small>${pct(p.realizedPct)}</small>` : `<div class="big" style="font-size:1.2rem">${usd(price)}</div>${qTag(q)}`}</div>
       </div>
-      ${closed ? `<div class="callout ok">Cerrada el ${when(p.close.date)} a <b>${usd(p.close.price)}</b> (${p.close.source === 'simulacion' ? 'cierre automático del simulador' : p.close.source === 'integracion' ? 'confirmado por integración' : 'precio ejecutado registrado por ti'}). Comisión de venta ${usd(p.close.fee)}. Alertas detenidas. ${cop(p.realizedPnl)}</div>` : `
+      ${closed ? `<div class="callout ok">Cerrada el ${when(p.close.date)} a <b>${usd(p.close.price)}</b>${fills.length > 1 ? ` (precio promedio de ${fills.length} ventas)` : ` (${p.close.source === 'simulacion' ? 'cierre automático del simulador' : p.close.source === 'integracion' ? 'confirmado por integración' : 'precio ejecutado registrado por ti'})`}. Comisiones de venta ${usd(p.close.fee)}. Alertas detenidas. ${cop(p.realizedPnl)}</div>` : `
       <div class="progress"><i style="width:${(m.progress * 100).toFixed(1)}%"></i></div>
       <div class="muted" style="font-size:13px">${m.toTargetUsd > 0 ? `Faltan <b>${usd(m.toTargetUsd)}</b> por acción (${pct(m.toTargetPct, false)}) para el objetivo ${t.pct === 10 ? '+10 %' : '+' + t.pct + ' %'} ${p.targetBasis}` : '<b>Precio en o por encima del objetivo</b>'}</div>
       ${p.status === 'objetivo_alcanzado' ? `<div class="callout hit">🎯 <b>Objetivo alcanzado</b> el ${when(p.targetHitAt)} a ${usd(p.targetHitPrice)}. La operación sigue <b>abierta</b>: márcala como cerrada solo cuando registres el precio al que realmente vendiste en eToro.</div>` : ''}
       ${p.stopHitAt ? `<div class="callout bad">⚠️ Tocó la salida por pérdida el ${when(p.stopHitAt)} a ${usd(p.stopHitPrice)}.</div>` : ''}
       <div class="grid3" style="margin-top:8px">
         <div class="stat"><div class="k">G/P actual (neta)</div><div class="v ${cls(m.pnl)}">${susd(m.pnl)}</div><div class="s">${pct(m.pnlPct)} · ${cop(m.pnl)}</div></div>
-        <div class="stat"><div class="k">Capital expuesto</div><div class="v">${usd(m.exposed)}</div><div class="s">invertido ${usd(m.cost)}</div></div>
+        <div class="stat"><div class="k">Capital expuesto</div><div class="v">${usd(m.exposed)}</div><div class="s">${fills.length ? 'abierto ' + usd(m.cost) + ' de ' + usd(p.capital) : 'invertido ' + usd(m.cost)}</div></div>
         <div class="stat"><div class="k">Objetivo bruto</div><div class="v">${usd(t.gross)}</div><div class="s">neto: ${usd(t.net)}</div></div>
       </div>
       ${p.overLimit ? `<div class="callout bad">El capital de esta operación (${usd(p.capital)}) supera tu límite por operación (${usd(S.state.settings.maxCapitalPerTrade)}).</div>` : ''}
       ${t.stop ? `<div class="row"><span>Alerta de pérdida (−${p.stopPct} %)</span><span class="neg">${usd(t.stop)}</span></div>` : ''}
       ${p.mode === 'real' ? `<div class="row"><span>Take Profit sugerido en eToro</span><span><b>${usd(t.trigger)}</b> <small>(${p.targetBasis})</small></span></div>` : ''}`}
+      ${fillsHtml}
+      ${p.notes ? `<div class="hint">📝 ${esc(p.notes)}</div>` : ''}
+      ${p.edits && p.edits.length ? `<div class="hint">Editada ${when(p.edits[p.edits.length - 1].at)}</div>` : ''}
       <div class="actions">
-        ${!closed && p.mode === 'real' ? `<button class="btn ${p.status === 'objetivo_alcanzado' ? 'good' : ''} small" data-act="close" data-id="${p.id}">Registrar venta ejecutada</button>` : ''}
-        ${!closed && p.mode === 'simulacion' ? `<button class="btn small" data-act="close" data-id="${p.id}">Cerrar ahora</button>` : ''}
+        ${!closed && p.mode === 'real' ? `<button class="btn ${p.status === 'objetivo_alcanzado' ? 'good' : ''} small" data-act="close" data-id="${p.id}">Registrar venta</button>` : ''}
+        ${!closed && p.mode === 'simulacion' ? `<button class="btn small" data-act="close" data-id="${p.id}">Vender</button>` : ''}
+        <button class="btn small" data-act="edit" data-id="${p.id}">Editar</button>
+        ${fills.length && fills[fills.length - 1].source !== 'integracion' ? `<button class="btn ghost small" data-act="undo" data-id="${p.id}">Deshacer última venta</button>` : ''}
         ${!closed ? `<button class="btn small" data-act="price" data-id="${p.id}">${p.mode === 'simulacion' ? 'Mover precio' : 'Precio manual'}</button>` : ''}
         <button class="btn ghost small danger" data-act="del" data-id="${p.id}">Eliminar</button>
       </div>
@@ -528,16 +539,47 @@
     const isSim = p.mode === 'simulacion';
     const q = quoteFor(p.ticker);
     const def = isSim ? (q ? q.price : '') : '';
-    openDialog(`<h2>${isSim ? 'Cerrar posición de práctica' : 'Registrar venta ejecutada'} · ${p.ticker}</h2>
+    openDialog(`<h2>${isSim ? 'Vender (práctica)' : 'Registrar venta ejecutada'} · ${p.ticker}</h2>
       ${isSim ? '' : '<div class="callout hit">Ingresa el precio al que <b>realmente</b> se ejecutó la venta en eToro (en el historial de la operación). El resultado y el historial se calculan con este precio.</div>'}
       ${field('price', 'Precio de venta ejecutado (USD)', def, numAttrs + ' required min="0" autofocus', `Objetivo: ${usd(t.trigger)}`)}
+      ${field('shares', 'Acciones vendidas', C.r4(p.shares), numAttrs + ' required min="0" max="' + p.shares + '"', `Quedan ${nf4.format(p.shares)} abiertas. Si vendes menos, la operación sigue abierta con el resto (venta parcial). En eToro: «Cerrar parcialmente».`)}
       ${field('date', 'Fecha y hora de la venta', new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16), 'type="datetime-local"')}
       ${field('fee', 'Comisión de venta (USD) — opcional', '', numAttrs + ' min="0"', 'Vacío = se calcula con los costos de la ficha')}
-      <div class="actions"><button class="btn primary" value="ok">Marcar como cerrada</button><button class="btn" value="cancel" formnovalidate>Cancelar</button></div>`,
+      <div class="actions"><button class="btn primary" value="ok">Registrar venta</button><button class="btn" value="cancel" formnovalidate>Cancelar</button></div>`,
     async (d) => {
-      await api.closePosition(p.id, { price: d.price, fee: d.fee, date: d.date ? new Date(d.date).toISOString() : undefined });
-      delete S.manual[p.ticker];
-      await loadState(); render(); toast(`${p.ticker} cerrada a ${usd(C.num(d.price))}`);
+      const r = await api.closePosition(p.id, { price: d.price, shares: d.shares, fee: d.fee, date: d.date ? new Date(d.date).toISOString() : undefined });
+      await loadState(); render();
+      toast(r.status === 'cerrada' ? `${p.ticker} cerrada · resultado ${susd(r.realizedPnl)}` : `Venta parcial registrada · quedan ${nf4.format(r.shares)} acciones de ${p.ticker}`);
+    });
+  }
+  function editDialog(p) {
+    const closed = p.status === 'cerrada';
+    const locked = (p.fills || []).length > 0;
+    const lk = locked || closed ? ' disabled' : '';
+    const lkOther = closed ? ' disabled' : '';
+    const local = (iso) => { const d = new Date(iso); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
+    openDialog(`<h2>Editar operación · ${p.ticker}</h2>
+      ${closed ? '<div class="callout info">Operación cerrada: solo puedes editar las notas. Para corregir la venta usa «Deshacer última venta».</div>' : locked ? '<div class="callout info">Tiene ventas registradas: ticker, precio de compra, acciones y comisión de compra quedan fijos. Deshaz las ventas si necesitas cambiarlos.</div>' : ''}
+      <div class="grid2">
+        ${field('ticker', 'Ticker', p.ticker, 'maxlength="10" autocapitalize="characters"' + lk)}
+        ${field('avgPrice', 'Precio promedio de compra (USD)', p.avgPrice, numAttrs + ' min="0"' + lk)}
+        ${field('shares', 'Acciones', p.shares, numAttrs + ' min="0"' + lk)}
+        ${field('buyFee', 'Comisión de compra (USD)', p.buyFee, numAttrs + ' min="0"' + lk)}
+        ${field('sellFeeFixed', 'Comisión de venta fija (USD)', p.sellFeeFixed, numAttrs + ' min="0"' + lkOther)}
+        ${field('sellFeePct', 'Comisión de venta (%)', p.sellFeePct, numAttrs + ' min="0"' + lkOther)}
+        ${field('targetPct', 'Objetivo (%)', p.targetPct, numAttrs + ' min="0"' + lkOther)}
+        <div class="field"><label>Alerta al tocar</label><select name="targetBasis"${lkOther}><option value="bruto" ${p.targetBasis === 'bruto' ? 'selected' : ''}>Objetivo bruto</option><option value="neto" ${p.targetBasis === 'neto' ? 'selected' : ''}>Objetivo neto</option></select></div>
+        ${field('stopPct', 'Alerta de pérdida (%)', p.stopPct || '', numAttrs + ' min="0"' + lkOther, 'Vacío = sin alerta')}
+        ${field('openedAt', 'Fecha de compra', local(p.openedAt), 'type="datetime-local"' + lk)}
+      </div>
+      <div class="field"><label for="f_notes">Notas</label><textarea id="f_notes" name="notes" rows="2" maxlength="500">${esc(p.notes)}</textarea></div>
+      <div class="hint">Si cambias el objetivo o la alerta de pérdida, la alerta se rearma y volverá a avisarte si el precio toca el nuevo nivel.</div>
+      <div class="actions"><button class="btn primary" value="ok">Guardar cambios</button><button class="btn" value="cancel" formnovalidate>Cancelar</button></div>`,
+    async (d) => {
+      if (d.openedAt) d.openedAt = new Date(d.openedAt).toISOString();
+      const r = await api.editPosition(p.id, d); // los campos deshabilitados no se envían
+      await loadState(); render();
+      toast(`${r.ticker} actualizada · objetivo ${usd(C.targets(r).trigger)}`);
     });
   }
   function priceDialog(p) {
@@ -631,6 +673,8 @@
         }
         case 'close': closeDialog(pos()); break;
         case 'price': priceDialog(pos()); break;
+        case 'edit': editDialog(pos()); break;
+        case 'undo': if (confirm('¿Deshacer la última venta registrada? Las acciones vuelven a quedar abiertas.')) { await api.undoFill(b.dataset.id); await loadState(); render(); toast('Venta deshecha'); } break;
         case 'del': if (confirm('¿Eliminar esta operación? Se borrará también del historial.')) { await api.deletePosition(b.dataset.id); await loadState(); render(); } break;
         case 'runRadar': await runRadar(); break;
         case 'sendRadar': { const r = await api.sendRadar(); S.radar = null; await loadState(); render(); if (r.notification) toast(r.notification.title); break; }

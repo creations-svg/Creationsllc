@@ -95,3 +95,24 @@ test('guardado persistente por usuario', async () => {
   assert.equal(loadState(user).watchlist.length, 8, 'no mezcla usuarios');
   saveState(other, loadState(other));
 });
+
+test('API: venta parcial, deshacer y edición', async () => {
+  const add = await api('POST', '/api/positions', { ticker: 'MSFT', avgPrice: 500, shares: 4, mode: 'real' });
+  const id = add.body.id;
+  const part = await api('POST', `/api/positions/${id}/close`, { price: 550, shares: 1 });
+  assert.equal(part.body.status, 'abierta');
+  assert.equal(part.body.shares, 3);
+  assert.equal(part.body.realizedPnl, 50);
+  const tooMany = await api('POST', `/api/positions/${id}/close`, { price: 550, shares: 5 });
+  assert.equal(tooMany.status, 400);
+  const locked = await api('PATCH', `/api/positions/${id}`, { avgPrice: 400 });
+  assert.equal(locked.status, 400);
+  const undo = await api('POST', `/api/positions/${id}/undo-fill`);
+  assert.equal(undo.body.shares, 4);
+  const ed = await api('PATCH', `/api/positions/${id}`, { avgPrice: '480', targetPct: '12', notes: 'ok' });
+  assert.equal(ed.status, 200);
+  assert.equal(ed.body.avgPrice, 480);
+  assert.equal(ed.body.capital, 1920);
+  const st = (await api('GET', '/api/state')).body;
+  assert.equal(st.positions.find((x) => x.id === id).notes, 'ok');
+});
